@@ -3,11 +3,11 @@ package com.camunda.consulting.processInstanceArchive.extractor.sdk;
 import com.camunda.consulting.processInstanceArchive.model.instance.ElementInstanceExtension;
 import com.camunda.consulting.processInstanceArchive.model.instance.JobInstance;
 import com.camunda.consulting.processInstanceArchive.model.instance.MessageInstance;
-import com.camunda.consulting.processInstanceArchive.model.instance.ProcessInstance;
 import com.camunda.consulting.processInstanceArchive.model.instance.SignalInstance;
 import com.camunda.consulting.processInstanceArchive.model.instance.TimerInstance;
 import com.camunda.consulting.processInstanceArchive.model.instance.UserTaskInstance;
 import com.camunda.consulting.processInstanceArchive.model.reference.DecisionInstanceRef;
+import com.camunda.consulting.processInstanceArchive.model.reference.ProcessInstanceRef;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -28,7 +28,7 @@ public class ElementInstanceExtensionObjectMapperConfigurerTest {
         SignalInstance.class,
         TimerInstance.class,
         UserTaskInstance.class,
-        ProcessInstance.class
+        ProcessInstanceRef.class
     );
   }
 

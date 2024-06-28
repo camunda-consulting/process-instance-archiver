@@ -4,4 +4,4 @@ import com.camunda.consulting.processInstanceArchive.model.instance.ProcessInsta
 
 import java.util.List;
 
-public record ProcessDefinition(String bpmnXml, String key, String bpmnXmlId ,String name, Long version, String versionTag, String tenantId, List<ProcessInstance> processInstances) {}
+public record ProcessDefinition(String bpmnXml, String key, String bpmnXmlId ,String name, Long version, String versionTag, String tenantId) {}

@@ -1,30 +1,34 @@
 package com.camunda.consulting.processInstanceArchive.extractor.sdk;
 
-import com.camunda.consulting.processInstanceArchive.model.definition.DecisionDefinition;
-import com.camunda.consulting.processInstanceArchive.model.definition.DecisionRequirementsDefinition;
+import com.camunda.consulting.processInstanceArchive.extractor.sdk.ProcessEngineAdapter.ProcessInstanceFilter;
+import com.camunda.consulting.processInstanceArchive.extractor.sdk.handler.ElementInstanceExtensionHandler;
 import com.camunda.consulting.processInstanceArchive.model.definition.ProcessDefinition;
 import com.camunda.consulting.processInstanceArchive.model.definition.ProcessEngine;
-import com.camunda.consulting.processInstanceArchive.model.instance.DecisionInstance;
-import com.camunda.consulting.processInstanceArchive.model.instance.ElementInstance;
 import com.camunda.consulting.processInstanceArchive.model.instance.ProcessInstance;
-import com.camunda.consulting.processInstanceArchive.model.reference.DecisionInstanceRef;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
-import java.util.Map.Entry;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
+import java.util.Set;
 
 public class ProcessInstanceDataExtractorImpl implements ProcessInstanceDataExtractor {
   private final ProcessEngineAdapter processEngineAdapter;
   private final ProcessInstanceFilter processInstanceFilter;
+  private final Set<ElementInstanceExtensionHandler> elementInstanceExtensionHandlers;
+
+  public ProcessInstanceDataExtractorImpl(
+      ProcessEngineAdapter processEngineAdapter,
+      ProcessInstanceFilter processInstanceFilter,
+      Set<ElementInstanceExtensionHandler> elementInstanceExtensionHandlers
+  ) {
+    this.processEngineAdapter = processEngineAdapter;
+    this.processInstanceFilter = processInstanceFilter;
+    this.elementInstanceExtensionHandlers = elementInstanceExtensionHandlers;
+  }
 
   public ProcessInstanceDataExtractorImpl(
       ProcessEngineAdapter processEngineAdapter, ProcessInstanceFilter processInstanceFilter
   ) {
-    this.processEngineAdapter = processEngineAdapter;
-    this.processInstanceFilter = processInstanceFilter;
+    this(processEngineAdapter, processInstanceFilter, ElementInstanceExtensionHandler.load());
   }
 
   @Override
@@ -33,89 +37,42 @@ public class ProcessInstanceDataExtractorImpl implements ProcessInstanceDataExtr
   }
 
   private ProcessEngine extractProcessEngine() {
-    List<ProcessDefinition> processDefinitions = extractProcessDefinitions();
-    List<DecisionInstanceRef> referencedDecisionInstances = extractReferencesForProcessDefinitions(processDefinitions);
-    return new ProcessEngine(
-        processEngineAdapter.id(),
+    ProcessEngine processEngine = new ProcessEngine(processEngineAdapter.id(),
         "camunda8",
         processEngineAdapter.tags(),
-        processDefinitions,
-        extractDecisionRequirementsDefinitions(referencedDecisionInstances)
+        new ArrayList<>(),
+        new ArrayList<>(),
+        new ArrayList<>(),
+        new ArrayList<>()
     );
+    extractProcessInstances(processEngine);
+    return processEngine;
   }
 
-  private List<DecisionInstanceRef> extractReferencesForProcessDefinitions(List<ProcessDefinition> processDefinitions) {
-    List<DecisionInstanceRef> referencedDecisionInstances = new ArrayList<>();
-    for (ProcessDefinition processDefinition : processDefinitions) {
-      referencedDecisionInstances.addAll(extractReferences(processDefinition));
-    }
-    return referencedDecisionInstances
+  private void extractProcessInstances(ProcessEngine processEngine) {
+    List<ProcessInstance> processInstances = processEngineAdapter.getProcessInstances(processInstanceFilter,
+        processEngine,
+        elementInstanceExtensionHandlers
+    );
+    processEngine
+        .processInstances()
+        .addAll(processInstances);
+    processEngine
+        .processDefinitions()
+        .addAll(processInstances
+            .stream()
+            .map(ProcessInstance::processDefinitionKey)
+            .distinct()
+            .filter(processDefinitionKey -> isNotCollected(processDefinitionKey, processEngine.processDefinitions()))
+            .map(processEngineAdapter::getProcessDefinition)
+            .toList());
+  }
+
+  private boolean isNotCollected(String processDefinitionKey, List<ProcessDefinition> processDefinitions) {
+    return processDefinitions
         .stream()
-        .distinct()
-        .toList();
+        .noneMatch(pd -> pd
+            .key()
+            .equals(processDefinitionKey));
   }
-
-  private List<DecisionInstanceRef> extractReferences(ProcessDefinition processDefinition) {
-    return extractReferencesForProcessInstances(processDefinition.processInstances());
-  }
-
-  private List<DecisionInstanceRef> extractReferencesForProcessInstances(List<ProcessInstance> processInstances) {
-    List<DecisionInstanceRef> referencedDecisionInstances = new ArrayList<>();
-    for (ProcessInstance processInstance : processInstances) {
-      referencedDecisionInstances.addAll(processEngineAdapter.getReferences(processInstance));
-    }
-    return referencedDecisionInstances;
-  }
-
-
-
-  private List<DecisionRequirementsDefinition> extractDecisionRequirementsDefinitions(
-      List<DecisionInstanceRef> referencedDecisionInstances
-  ) {
-    // find all decision instances
-    Map<String, List<DecisionInstance>> decisionInstances = extractDecisionInstances(referencedDecisionInstances);
-    // extract their decision definitions
-    Map<String, List<DecisionDefinition>> decisionDefinitions = decisionInstances
-        .entrySet()
-        .stream()
-        .map(e -> processEngineAdapter.getDecisionDefinition(e.getKey(), e.getValue()))
-        .collect(Collectors.groupingBy(Entry::getKey, Collectors.mapping(Entry::getValue, Collectors.toList())));
-    // extract their decision requirement definitions
-    return decisionDefinitions
-        .entrySet()
-        .stream()
-        .map(e -> processEngineAdapter.getDecisionRequirementsDefinition(e.getKey(), e.getValue()))
-        .toList();
-  }
-
-  private Map<String, List<DecisionInstance>> extractDecisionInstances(
-      List<DecisionInstanceRef> referencedDecisionInstances
-  ) {
-    return referencedDecisionInstances
-        .stream()
-        .flatMap(this::extractRelatedDecisionInstances)
-        .map(DecisionInstanceRef::key)
-        .map(processEngineAdapter::getDecisionInstance)
-        .collect(Collectors.groupingBy(Entry::getKey, Collectors.mapping(Entry::getValue, Collectors.toList())));
-  }
-
-  private Stream<DecisionInstanceRef> extractRelatedDecisionInstances(
-      DecisionInstanceRef ref
-  ) {
-    return processEngineAdapter
-        .getRelatedDecisionInstances(ref)
-        .stream();
-  }
-
-  private List<ProcessDefinition> extractProcessDefinitions() {
-    Map<String, List<ProcessInstance>> processInstancesByDefinitionKey = processEngineAdapter.getProcessInstances(
-        processInstanceFilter);
-    return processInstancesByDefinitionKey
-        .entrySet()
-        .stream()
-        .map(e -> processEngineAdapter.getProcessDefinition(e.getKey(), e.getValue()))
-        .toList();
-  }
-
-
 }

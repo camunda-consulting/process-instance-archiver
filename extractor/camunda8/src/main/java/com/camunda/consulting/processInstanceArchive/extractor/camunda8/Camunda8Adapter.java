@@ -1,33 +1,34 @@
 package com.camunda.consulting.processInstanceArchive.extractor.camunda8;
 
-import com.camunda.consulting.processInstanceArchive.extractor.sdk.ElementInstanceContext;
-import com.camunda.consulting.processInstanceArchive.extractor.sdk.ElementInstanceExtensionHandler;
 import com.camunda.consulting.processInstanceArchive.extractor.sdk.ProcessEngineAdapter;
-import com.camunda.consulting.processInstanceArchive.extractor.sdk.ProcessInstanceFilter;
+import com.camunda.consulting.processInstanceArchive.extractor.sdk.handler.ElementInstanceContext;
+import com.camunda.consulting.processInstanceArchive.extractor.sdk.handler.ElementInstanceExtensionHandler;
 import com.camunda.consulting.processInstanceArchive.model.definition.DecisionDefinition;
 import com.camunda.consulting.processInstanceArchive.model.definition.DecisionRequirementsDefinition;
 import com.camunda.consulting.processInstanceArchive.model.definition.ProcessDefinition;
+import com.camunda.consulting.processInstanceArchive.model.definition.ProcessEngine;
 import com.camunda.consulting.processInstanceArchive.model.instance.DecisionInstance;
-import com.camunda.consulting.processInstanceArchive.model.instance.DecisionInstanceOutputValue;
 import com.camunda.consulting.processInstanceArchive.model.instance.ElementInstance;
 import com.camunda.consulting.processInstanceArchive.model.instance.ElementInstanceExtension;
 import com.camunda.consulting.processInstanceArchive.model.instance.InstanceState;
+import com.camunda.consulting.processInstanceArchive.model.instance.JobInstance;
+import com.camunda.consulting.processInstanceArchive.model.instance.MessageInstance;
 import com.camunda.consulting.processInstanceArchive.model.instance.ProcessInstance;
+import com.camunda.consulting.processInstanceArchive.model.instance.SignalInstance;
+import com.camunda.consulting.processInstanceArchive.model.instance.TimerInstance;
+import com.camunda.consulting.processInstanceArchive.model.instance.UserTaskInstance;
 import com.camunda.consulting.processInstanceArchive.model.instance.VariableValueInstance;
-import com.camunda.consulting.processInstanceArchive.model.reference.DecisionInstanceRef;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.camunda.operate.CamundaOperateClient;
 import io.camunda.operate.exception.OperateException;
-import io.camunda.operate.model.DecisionInstanceInput;
-import io.camunda.operate.model.DecisionInstanceOutput;
 import io.camunda.operate.model.DecisionRequirements;
 import io.camunda.operate.model.FlowNodeInstance;
 import io.camunda.operate.model.FlowNodeInstanceState;
 import io.camunda.operate.model.ProcessInstanceState;
 import io.camunda.operate.model.SearchResult;
 import io.camunda.operate.model.Variable;
-import io.camunda.operate.search.DecisionInstanceFilter;
+import io.camunda.operate.search.DecisionDefinitionFilter;
 import io.camunda.operate.search.Filter;
 import io.camunda.operate.search.FlowNodeInstanceFilter;
 import io.camunda.operate.search.SearchQuery;
@@ -39,30 +40,20 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.Set;
-import java.util.stream.Collectors;
-
-import static java.util.Optional.*;
 
 public class Camunda8Adapter implements ProcessEngineAdapter {
   private final CamundaOperateClient operateClient;
   private final ObjectMapper objectMapper;
-  private final Set<ElementInstanceExtensionHandler> elementInstanceExtensionHandlers;
   private final String id;
   private final Map<String, String> tags;
 
   public Camunda8Adapter(
-      CamundaOperateClient operateClient,
-      ObjectMapper objectMapper,
-      Set<ElementInstanceExtensionHandler> elementInstanceExtensionHandlers,
-      String id,
-      Map<String, String> tags
+      CamundaOperateClient operateClient, ObjectMapper objectMapper, String id, Map<String, String> tags
   ) {
     this.operateClient = operateClient;
     this.objectMapper = objectMapper;
-    this.elementInstanceExtensionHandlers = elementInstanceExtensionHandlers;
     this.id = id;
     this.tags = tags;
   }
@@ -77,43 +68,69 @@ public class Camunda8Adapter implements ProcessEngineAdapter {
     return tags;
   }
 
+  // DRD
+
   @Override
-  public List<DecisionInstanceRef> getRelatedDecisionInstances(DecisionInstanceRef decisionInstanceRef) {
+  public DecisionRequirementsDefinition getDecisionRequirementsDefinition(DecisionRequirementsDefinitionFilter filter) {
     try {
-      return searchData(operateClient::searchDecisionInstanceResults,
-          DecisionInstanceFilter
-              .builder()
-              .key(Long.valueOf(decisionInstanceRef.key()))
-              .build()
-      )
+      DecisionRequirements decisionRequirements = operateClient.getDecisionRequirements(Long.valueOf(
+          getDecisionDefinition(filter.decisionDefinitionKey()).getKey()));
+      String decisionRequirementsXml = operateClient.getDecisionRequirementsXml(decisionRequirements.getKey());
+      return fromOperate(decisionRequirements,
+          decisionRequirementsXml,
+          getDecisionDefinitions(decisionRequirements.getKey())
+      );
+    } catch (OperateException e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  private DecisionRequirementsDefinition fromOperate(
+      DecisionRequirements decisionRequirements, String dmnXml, List<DecisionDefinition> decisionDefinitions
+  ) {
+
+    return new DecisionRequirementsDefinition(String.valueOf(decisionRequirements.getKey()),
+        dmnXml,
+        decisionRequirements.getId(),
+        decisionRequirements.getName(),
+        null,
+        decisionRequirements.getVersion(),
+        decisionDefinitions,
+        decisionRequirements.getTenantId()
+    );
+  }
+
+  // DD
+
+  private List<DecisionDefinition> getDecisionDefinitions(Long decisionRequirementsKey) {
+    try {
+      return operateClient
+          .searchDecisionDefinitions(new SearchQuery.Builder()
+              .filter(DecisionDefinitionFilter
+                  .builder()
+                  .decisionRequirementsKey(decisionRequirementsKey)
+                  .build())
+              .build())
           .stream()
-          .map(di -> new DecisionInstanceRef(di.getId(), decisionInstanceRef.key()))
+          .map(this::fromOperate)
           .toList();
     } catch (OperateException e) {
-      throw new RuntimeException("Error while extracting related decision instances for key " + decisionInstanceRef.key(),
+      throw new RuntimeException("Error while fetching decision definitions for decision requirement " + decisionRequirementsKey,
           e
       );
     }
   }
 
-  @Override
-  public Entry<String, DecisionInstance> getDecisionInstance(String decisionInstanceId) {
-    try {
-      io.camunda.operate.model.DecisionInstance decisionInstance = operateClient.getDecisionInstance(decisionInstanceId);
-      Map<String, Object> inputs = buildInputs(decisionInstance.getEvaluatedInputs());
-      Map<String, DecisionInstanceOutputValue> outputs = buildOutputs(decisionInstance.getEvaluatedOutputs());
-      return Map.entry(decisionInstance.getDecisionDefinitionId(),
-          new DecisionInstance(decisionInstance.getId(), inputs, outputs, decisionInstance.getTenantId())
-      );
-
-    } catch (Exception e) {
-      throw new RuntimeException("An error happened while fetching the decision instance " + decisionInstanceId, e);
-    }
+  private DecisionDefinition fromOperate(io.camunda.operate.model.DecisionDefinition decisionDefinition) {
+    return new DecisionDefinition(String.valueOf(decisionDefinition.getKey()),
+        decisionDefinition.getName(),
+        decisionDefinition.getId(),
+        decisionDefinition.getTenantId()
+    );
   }
 
-  @Override
-  public Map.Entry<String, DecisionDefinition> getDecisionDefinition(
-      String key, List<DecisionInstance> decisionInstances
+  private Map.Entry<String, DecisionDefinition> getDecisionDefinition(
+      String key
   ) {
     try {
       io.camunda.operate.model.DecisionDefinition decisionDefinition = operateClient.getDecisionDefinition(Long.parseLong(
@@ -122,7 +139,6 @@ public class Camunda8Adapter implements ProcessEngineAdapter {
           new DecisionDefinition(String.valueOf(decisionDefinition.getKey()),
               decisionDefinition.getName(),
               decisionDefinition.getId(),
-              decisionInstances,
               decisionDefinition.getTenantId()
           )
       );
@@ -131,47 +147,11 @@ public class Camunda8Adapter implements ProcessEngineAdapter {
     }
   }
 
-  @Override
-  public DecisionRequirementsDefinition getDecisionRequirementsDefinition(
-      String key, List<DecisionDefinition> decisionDefinition
-  ) {
-    try {
-      DecisionRequirements decisionRequirements = operateClient.getDecisionRequirements(Long.parseLong(key));
-      String decisionRequirementsXml = operateClient.getDecisionRequirementsXml(Long.parseLong(key));
-      return new DecisionRequirementsDefinition(String.valueOf(decisionRequirements.getKey()),
-          decisionRequirementsXml,
-          decisionRequirements.getId(),
-          decisionRequirements.getName(),
-          null,
-          decisionRequirements.getVersion(),
-          decisionDefinition,
-          decisionRequirements.getTenantId()
-      );
-    } catch (OperateException e) {
-      throw new RuntimeException("An error happened while fetching the decision requirements definition " + key, e);
-    }
-  }
-
-  @Override
-  public Map<String, List<ProcessInstance>> getProcessInstances(ProcessInstanceFilter processInstanceFilter) {
-    io.camunda.operate.search.ProcessInstanceFilter filter = io.camunda.operate.search.ProcessInstanceFilter
-        .builder()
-        .build();
-    try {
-      return searchData(operateClient::searchProcessInstanceResults, filter, 1000L)
-          .stream()
-          .collect(Collectors.groupingBy(pi -> String.valueOf(pi.getProcessDefinitionKey()),
-              Collectors.mapping(this::fromOperate, Collectors.toList())
-          ));
-    } catch (OperateException e) {
-
-      throw new RuntimeException("An error happened while fetching the process instances", e);
-    }
-  }
+  // PD
 
   @Override
   public ProcessDefinition getProcessDefinition(
-      String processDefinitionKey, List<ProcessInstance> processInstances
+      String processDefinitionKey
   ) {
     try {
       io.camunda.operate.model.ProcessDefinition processDefinition = operateClient.getProcessDefinition(Long.valueOf(
@@ -183,13 +163,14 @@ public class Camunda8Adapter implements ProcessEngineAdapter {
           processDefinition.getName(),
           processDefinition.getVersion(),
           null,
-          processDefinition.getTenantId(),
-          processInstances
+          processDefinition.getTenantId()
       );
     } catch (OperateException e) {
       throw new RuntimeException("Error while fetching process definition " + processDefinitionKey, e);
     }
   }
+
+  // VAR
 
   @Override
   public Map<String, VariableValueInstance> getVariables(
@@ -235,81 +216,79 @@ public class Camunda8Adapter implements ProcessEngineAdapter {
   }
 
   @Override
-  public List<ElementInstance> getElementInstances(String processInstanceKey) {
+  public List<ProcessInstance> getProcessInstances(
+      ProcessInstanceFilter processInstanceFilter,
+      ProcessEngine processEngine,
+      Set<ElementInstanceExtensionHandler> elementInstanceExtensionHandlers
+  ) {
+    io.camunda.operate.search.Filter filter = fromArchiver(processInstanceFilter);
     try {
-      return searchData(operateClient::searchFlowNodeInstanceResults,
-          FlowNodeInstanceFilter
-              .builder()
-              .processInstanceKey(Long.valueOf(processInstanceKey))
-              .build()
-      )
+      return searchData(operateClient::searchProcessInstanceResults, filter, 1000L)
           .stream()
-          .map(fni -> new ElementInstance(fni.getFlowNodeId(),
-              String.valueOf(fni.getKey()),
-              mapState(fni.getState()),
-              LocalDateTime.ofInstant(fni
-                  .getStartDate()
-                  .toInstant(), ZoneId.systemDefault()),
-              LocalDateTime.ofInstant(fni
-                  .getEndDate()
-                  .toInstant(), ZoneId.systemDefault()),
-              extractChildElementInstances(fni),
-              getVariables(String.valueOf(fni.getKey())),
-              extractElementInstanceExtension(new ElementInstanceContext(String.valueOf(fni.getKey()), fni.getType())),
-              isMultiInstanceBody(fni)
-          ))
+          .filter(pi -> isRelevantProcessInstance(processInstanceFilter.parentElementKey() != null ,pi.getParentKey() != null))
+          .map(pi -> fromOperate(pi, processEngine, elementInstanceExtensionHandlers))
           .toList();
     } catch (OperateException e) {
-      throw new RuntimeException("Error while finding element instances for process instance " + processInstanceKey, e);
-    }
-
-  }
-
-  @Override
-  public List<DecisionInstanceRef> getReferences(ElementInstance elementInstance) {
-    List<DecisionInstanceRef> referencedDecisionInstances = new ArrayList<>();
-    ofNullable(elementInstance.extension()).ifPresent(p -> referencedDecisionInstances.addAll(
-        elementInstanceExtensionHandlers
-            .stream()
-            .flatMap(h -> h
-                .extractDecisionInstances(p)
-                .stream())
-            .toList()));
-    ofNullable(elementInstance.childElementInstances()).ifPresent(e -> referencedDecisionInstances.addAll(
-        extractReferencesForElementInstances(e)));
-    return referencedDecisionInstances;
-  }
-
-  @Override
-  public List<DecisionInstanceRef> getReferences(ProcessInstance processInstance) {
-    return extractReferencesForElementInstances(processInstance.elementInstances());
-  }
-
-  @Override
-  public ProcessInstance getProcessInstance(ProcessInstanceFilter processInstanceFilter) {
-    try {
-      List<io.camunda.operate.model.ProcessInstance> processInstances = searchData(operateClient::searchProcessInstanceResults,
-          new ParentFlowNodeInstanceKeyFilter(Long.valueOf(processInstanceFilter.parentElementKey()))
-      );
-      if (processInstances.size() == 1) {
-        return fromOperate(processInstances.getFirst());
-      }
-      throw new IllegalStateException("Expected to find exactly one process instance for filter " + processInstanceFilter + ", but were " + processInstances.size());
-    } catch (OperateException e) {
-      throw new RuntimeException("Error while fetching process instances for filter " + processInstanceFilter, e);
+      throw new RuntimeException("An error happened while fetching the process instances", e);
     }
   }
 
-  private List<DecisionInstanceRef> extractReferencesForElementInstances(List<ElementInstance> elementInstances) {
-    List<DecisionInstanceRef> referencedDecisionInstances = new ArrayList<>();
-    for (ElementInstance elementInstance : elementInstances) {
-      referencedDecisionInstances.addAll(getReferences(elementInstance));
-    }
-    return referencedDecisionInstances;
+  private boolean isRelevantProcessInstance(boolean filterForParentElementKey, boolean parentElementPresent){
+    return filterForParentElementKey == parentElementPresent;
   }
 
-  private ProcessInstance fromOperate(io.camunda.operate.model.ProcessInstance processInstance) {
+  private io.camunda.operate.search.Filter fromArchiver(ProcessInstanceFilter processInstanceFilter) {
+    if (processInstanceFilter.parentElementKey() == null) {
+      return io.camunda.operate.search.ProcessInstanceFilter
+          .builder()
+          .build();
+    }
+    return new ParentFlowNodeInstanceKeyFilter(Long.valueOf(processInstanceFilter.parentElementKey()));
+  }
+
+  @Override
+  public List<JobInstance> getJobInstances(JobInstanceFilter jobInstanceFilter) {
+    // TODO there is no way to retrieve the job instance for an element as of now
+    return List.of();
+  }
+
+  @Override
+  public List<MessageInstance> getMessageInstances(MessageInstanceFilter messageInstanceFilter) {
+    // TODO there is no way to retrieve the message instance for an element as of now
+    return List.of();
+  }
+
+  @Override
+  public List<DecisionInstance> getDecisionInstances(DecisionInstanceFilter decisionInstanceFilter) {
+    // TODO there is no way to retrieve the decision instance for an element as of now
+    return List.of();
+  }
+
+  @Override
+  public List<SignalInstance> getSignalInstances(SignalInstanceFilter signalInstanceFilter) {
+    // TODO there is no way to retrieve the signal instance for an element instance
+    return List.of();
+  }
+
+  @Override
+  public List<TimerInstance> getTimerInstances(TimerInstanceFilter timerInstanceFilter) {
+    // TODO there is no way to retrieve a timer instance for an element instance
+    return List.of();
+  }
+
+  @Override
+  public List<UserTaskInstance> getUserTaskInstances(UserTaskInstanceFilter userTaskInstanceFilter) {
+    // TODO there is no way to retrieve a user task instance for an element instance
+    return List.of();
+  }
+
+  private ProcessInstance fromOperate(
+      io.camunda.operate.model.ProcessInstance processInstance,
+      ProcessEngine processEngine,
+      Set<ElementInstanceExtensionHandler> extensionHandlers
+  ) {
     return new ProcessInstance(String.valueOf(processInstance.getKey()),
+        String.valueOf(processInstance.getProcessDefinitionKey()),
         LocalDateTime.ofInstant(processInstance
             .getStartDate()
             .toInstant(), ZoneId.systemDefault()),
@@ -317,7 +296,7 @@ public class Camunda8Adapter implements ProcessEngineAdapter {
             .getEndDate()
             .toInstant(), ZoneId.systemDefault()),
         processInstance.getTenantId(),
-        extractElementInstances(String.valueOf(processInstance.getKey())),
+        extractElementInstances(String.valueOf(processInstance.getKey()), processEngine, extensionHandlers),
         getVariables(String.valueOf(processInstance.getKey())),
         null,
         mapState(processInstance.getState())
@@ -344,7 +323,11 @@ public class Camunda8Adapter implements ProcessEngineAdapter {
     }
   }
 
-  private List<ElementInstance> extractElementInstances(String processInstanceKey) {
+  private List<ElementInstance> extractElementInstances(
+      String processInstanceKey,
+      ProcessEngine processEngine,
+      Set<ElementInstanceExtensionHandler> elementInstanceExtensionHandlers
+  ) {
     try {
       return searchData(operateClient::searchFlowNodeInstanceResults,
           FlowNodeInstanceFilter
@@ -364,7 +347,12 @@ public class Camunda8Adapter implements ProcessEngineAdapter {
                   .toInstant(), ZoneId.systemDefault()),
               extractChildElementInstances(fni),
               getVariables(String.valueOf(fni.getKey())),
-              extractElementInstanceExtension(new ElementInstanceContext(String.valueOf(fni.getKey()), fni.getType())),
+              extractElementInstanceExtension(new ElementInstanceContext(String.valueOf(fni.getKey()),
+                  fni.getType(),
+                  this,
+                  processEngine,
+                  elementInstanceExtensionHandlers
+              )),
               isMultiInstanceBody(fni)
           ))
           .toList();
@@ -378,12 +366,13 @@ public class Camunda8Adapter implements ProcessEngineAdapter {
   }
 
   private List<ElementInstance> extractChildElementInstances(FlowNodeInstance flowNodeInstance) {
-    // TODO the api should support "parentKey" on flowNodeInstance
+    // TODO there is no way to retrieve the child element instances of an element instance
     return List.of();
   }
 
   private ElementInstanceExtension extractElementInstanceExtension(ElementInstanceContext elementInstanceContext) {
-    List<? extends ElementInstanceExtension> list = elementInstanceExtensionHandlers
+    List<? extends ElementInstanceExtension> list = elementInstanceContext
+        .elementInstanceExtensionHandlers()
         .stream()
         .map(h -> h.createExtension(elementInstanceContext))
         .filter(Optional::isPresent)
@@ -396,41 +385,6 @@ public class Camunda8Adapter implements ProcessEngineAdapter {
       return null;
     }
     throw new IllegalStateException("Expected to get max 1 element instance extension, but got " + list.size() + " for " + elementInstanceContext + ": " + list);
-  }
-
-  private Map<String, DecisionInstanceOutputValue> buildOutputs(List<DecisionInstanceOutput> evaluatedOutputs) {
-    Map<String, DecisionInstanceOutputValue> outputs = new HashMap<>();
-    for (DecisionInstanceOutput output : evaluatedOutputs) {
-      if (outputs.containsKey(output.getName())) {
-        throw new IllegalStateException("Try to add key " + output.getName() + " twice");
-      }
-      try {
-        outputs.put(output.getName(),
-            new DecisionInstanceOutputValue(objectMapper.readTree(output.getValue()),
-                output.getRuleId(),
-                output.getRuleIndex()
-            )
-        );
-      } catch (JsonProcessingException e) {
-        throw new RuntimeException("Error while parsing value " + output.getValue() + " to json node", e);
-      }
-    }
-    return outputs;
-  }
-
-  private Map<String, Object> buildInputs(List<DecisionInstanceInput> evaluatedInputs) {
-    Map<String, Object> inputs = new HashMap<>();
-    for (DecisionInstanceInput input : evaluatedInputs) {
-      if (inputs.containsKey(input.getName())) {
-        throw new IllegalStateException("Try to add key " + input.getName() + " twice");
-      }
-      try {
-        inputs.put(input.getName(), objectMapper.readTree(input.getValue()));
-      } catch (JsonProcessingException e) {
-        throw new RuntimeException("Error while parsing value " + input.getValue() + " to json node", e);
-      }
-    }
-    return inputs;
   }
 
   private <T> List<T> searchData(
@@ -470,4 +424,5 @@ public class Camunda8Adapter implements ProcessEngineAdapter {
   }
 
   public record ParentFlowNodeInstanceKeyFilter(Long parentFlowNodeInstanceKey) implements Filter {}
+
 }
